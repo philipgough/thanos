@@ -577,14 +577,6 @@ func (h *Handler) forward(ctx context.Context, tenant string, r replica, wreq *p
 	span, ctx := tracing.StartSpan(ctx, "receive_fanout_forward")
 	defer span.Finish()
 
-	// It is possible that hashring is ready in testReady() but unready now,
-	// so need to lock here.
-	h.mtx.RLock()
-	if h.hashring == nil {
-		h.mtx.RUnlock()
-		return errors.New("hashring is not ready")
-	}
-
 	var replicas []uint64
 	if r.replicated {
 		replicas = []uint64{r.n}
@@ -597,11 +589,20 @@ func (h *Handler) forward(ctx context.Context, tenant string, r replica, wreq *p
 	wreqs := make(map[endpointReplica]trackedSeries)
 	for tsID, ts := range wreq.Timeseries {
 		for _, rn := range replicas {
+			// It is possible that hashring is ready in testReady() but unready now,
+			// so need to lock here.
+			h.mtx.RLock()
+			if h.hashring == nil {
+				h.mtx.RUnlock()
+				return errors.New("hashring is not ready")
+			}
 			endpoint, err := h.hashring.GetN(tenant, &ts, rn)
 			if err != nil {
 				h.mtx.RUnlock()
 				return err
 			}
+			h.mtx.RUnlock()
+
 			key := endpointReplica{endpoint: endpoint, replica: rn}
 			writeTarget, ok := wreqs[key]
 			if !ok {
@@ -615,8 +616,6 @@ func (h *Handler) forward(ctx context.Context, tenant string, r replica, wreq *p
 			wreqs[key] = writeTarget
 		}
 	}
-	h.mtx.RUnlock()
-
 	return h.fanoutForward(ctx, tenant, wreqs, len(wreq.Timeseries), r.replicated)
 }
 
